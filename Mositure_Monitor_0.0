@@ -1,0 +1,515 @@
+//No SD write ability (not enough SRAM on 328p, need a atmega4809 or equiv.).
+//Still no sleep function
+//Still no solar panel/li-on batt charging
+//clunky script
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+ 
+//Reads DHT11 and x6 Capacitive Moisture Sensors, projecting results onto OLED.
+//Confirms if DHT11 operates on boot. Will give "err!" if lost during use.
+//Confirms each soil sensor operates on boot. Each will give "err!" if lost during use. 
+//Alarms via piezo if moisture level reaches threshold
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+//Definitions and global variables.
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+#include <DHT.h>
+#include <LowPower.h>
+#include <SPI.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+#define DHTTYPE DHT11
+
+#define SCREEN_WIDTH 128 // OLED display width, in pixels
+#define SCREEN_HEIGHT 64 // OLED display height, in pixels
+#define OLED_RESET     4 // Reset pin # (or -1 if sharing Arduino reset pin)
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET); // Declaration for an SSD1306 display connected via I2C (SDA, SCL pins)
+
+const byte piezo = 11; //piezo buzzer on D11
+const int piezo_dur = 1500;
+const int piezo_freq = 2000;
+const int alarm_piezo_dur = 800;
+const int alarm_piezo_freq = 1300;
+const byte piezo_delay = 100;
+
+const byte oledVcc = 2;
+
+const byte ic_LED = 13; // built-on Arduino Nano LED on D13
+
+const byte sensorVcc0 = 4; //Vdd for sensor on D4
+const byte sensorVcc1 = 5;
+const byte sensorVcc2 = 6;
+const byte sensorVcc3 = 7;
+const byte sensorVcc4 = 8;
+const byte sensorVcc5 = 9;
+
+//volatile int sensorValue0 = 0; //variable for storing soil sensor value
+
+int sensor_value = 0; //for gen purpose read_sensor function
+
+int sensorValue0 = 0;
+int sensorValue1 = 0;
+int sensorValue2 = 0;
+int sensorValue3 = 0;
+int sensorValue4 = 0;
+int sensorValue5 = 0;
+
+byte soil_moisture_percent; //for gen purpose read_sensor function
+
+byte soilMoisturePercent0 = 0; //variable for moisture in percent
+byte soilMoisturePercent1 = 0;
+byte soilMoisturePercent2 = 0;
+byte soilMoisturePercent3 = 0;
+byte soilMoisturePercent4 = 0;
+byte soilMoisturePercent5 = 0;
+
+int value;  //variable for storing sensor value (average of multiple reads)
+const byte numReadings = 10; //number of reads to average
+byte i; //byte for average sensor read for statements
+
+//const byte ldrVcc = 0; //ldrVin output on D0
+//const byte ldrSig = 1; //ldr digital input on D1
+bool ldrValue;  //variable for storing ldr state (0/1)
+
+//const byte dhtVcc = 2; //DHT11 output on D2
+const byte dhtSig = 3;
+float h;  //variables for storing DHT values
+float t;
+float f;
+DHT dht(dhtSig, DHTTYPE);
+
+const byte warmup = 300;  //variable for milliseconds to delay sensor reading after energizing. 
+const byte senseWarm = 1000;
+const byte readDelay = 300;
+
+bool alarm_bit;
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+//Fixed moisture sensor calibration values.
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+//const int airValue = 840; //sensor calibration; value of capacitance in AIR(No 10k resistor to ground on analog pin, 5V via GPIO pin)
+//const int waterValue = 360; //sensor calibration; value of capacitance in WATER (No 10k resistor to ground on analog pin, 5V via GPIO pin)
+//const int airValue = 220; //sensor calibration; value of capacitance in AIR (5V rail via Nano 5V pin)
+//const int waterValue = 155; //sensor calibration; value of capacitance in WATER (5V rail via Nano 5V pin)
+const int airValue = 180; //sensor calibration; value of capacitance in AIR (10k resistor to ground on analog pin, 5V via GPIO pin)
+const int waterValue = 130; //sensor calibration; value of capacitance in WATER (10k resistor to ground on analog pin, 5V via GPIO pin)
+const int airValue1 = 125;
+const int waterValue1 = 81;
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+//Values for self-calibration. Should be a referenced array instead.
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+//volatile int waterValue0;
+//volatile int airValue0;
+//volatile int waterValue1;
+//volatile int airValue1;
+//volatile int waterValue2;
+//volatile int airValue2;
+//volatile int waterValue3;
+//volatile int airValue3;
+//volatile int waterValue4;
+//volatile int airValue4;
+//volatile int waterValue5;
+//volatile int airValue5;
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void setup() {
+  
+//Serial.begin(115200);
+  
+LED_blink();
+
+//pinMode(interruptPin, INPUT_PULLUP);
+//attachInterrupt(digitalPinToInterrupt(interruptPin), sensCalib, LOW);
+
+pinMode(piezo, OUTPUT);
+boot_chime();
+
+pinMode(oledVcc, OUTPUT);
+digitalWrite(oledVcc, HIGH);
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+//required for oled to properly boot; display? function at all? 
+if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { // Address 0x3D for 128x64
+    //Serial.println(F("SSD1306 allocation failed"));
+    for(;;);
+  }
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+//Clears display memory and sets initial character size and color variables. Prints "initializing"
+//as a sanity check. 
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+display.clearDisplay(); // Clear the buffer
+display.display();
+display.setTextSize(1.5);
+display.setTextColor(WHITE,BLACK);
+display.setCursor(0,0);
+display.println(F("Initializing"));
+display.display();
+delay(warmup);
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+//Initializes DHT and calls a sensor check funtion. 
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+dht.begin();
+DHT_read_check(); //Check DHT sensor returns values
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+//Defines sensor Vcc pins. Performs soil sensor response check and returns # of alive sensors.
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+pinMode(sensorVcc0, OUTPUT); //set sensor0 Vdd pin as OUTPUT
+digitalWrite(sensorVcc0, LOW); //set pin state to LOW
+pinMode(sensorVcc1, OUTPUT); //set sensor1 Vdd pin as OUTPUT
+digitalWrite(sensorVcc1, LOW); //set pin state to LOW
+pinMode(sensorVcc2, OUTPUT); //set sensor2 Vdd pin as OUTPUT
+digitalWrite(sensorVcc2, LOW); //set pin state to LOW
+pinMode(sensorVcc3, OUTPUT); //set sensor3 Vdd pin as OUTPUT
+digitalWrite(sensorVcc3, LOW); //set pin state to LOW
+pinMode(sensorVcc4, OUTPUT); //set sensor4 Vdd pin as OUTPUT
+digitalWrite(sensorVcc4, LOW); //set pin state to LOW
+pinMode(sensorVcc5, OUTPUT); //set sensor5 Vdd pin as OUTPUT
+digitalWrite(sensorVcc5, LOW); //set pin state to LOW
+
+soil_sensor_check();
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+//Defines LDR sensor Vcc and signal pins.
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+//pinMode(ldrVcc, OUTPUT);  //V1.4 removal
+//digitalWrite(ldrVcc, HIGH);  //V1.4 removal
+//pinMode(ldrSig, INPUT);  //V1.4 removal
+//digitalWrite(ldrSig, LOW);  //V1.4 removal
+
+
+//Prints "complete" to display; intended to confirm transition into main loop.
+display.setCursor(0, 30);
+display.println(F("Complete")); //Confirm entering main loop
+display.display();
+delay(warmup);
+display.clearDisplay();
+
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+void loop() {
+LED_blink();
+alarm_bit = 0;  
+display.clearDisplay();
+//delay(250);
+ldrValue = LOW;  //V1.4 addition; Temporary value to drive LDR low and not put OLED to sleep.
+
+if (ldrValue == LOW) {
+  alarm_bit = 0;
+  digitalWrite(oledVcc, HIGH);
+  display.setCursor(35,30);
+  display.println(F("SOIL H20"));
+  display.setCursor(83, 30);
+  display.println(F(":%"));
+  LED_blink();
+  DHT_read();
+
+  read_sensor(4,A0,130,180,0,40); //(byte analog_vcc_pin,byte analog_pin,int lower_bound,int upper_bound,byte x_coord,byte y_coord)
+  read_sensor(5,A1,81,125,53,40);
+  //read_sensor(6,A2,xxx,xxx,103,40);
+  //read_sensor(7,A3,xxx,xxx,0,50);
+  //read_sensor(8,A6,xxx,xxx,53,50);
+  //read_sensor(9,A7,xxx,xxx,103,50);
+  display.display();
+  soil_alarm();
+//  delay(500);
+}
+//  else {
+//  digitalWrite(ldrVcc, LOW);    //V1.4 removal
+//  display.clearDisplay();   //V1.4 removal
+//  display.setCursor(40,30);   //V1.4 removal
+//  display.println("IDLE SC");  //V1.4 removal
+//  display.display();  //V1.4 removal
+//  delay(1000);  //V1.4 removal
+//  digitalWrite(oledVcc, LOW);  //V1.4 removal
+//  digitalWrite(ldrSig, LOW);  //V1.4 removal
+//    return;
+//}
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+//Puts the MCU to sleep. No desire to flesh this out yet. Was originally for a solar powered monitor.
+//Maybe an else statement with an interrupt driven by the LDR sensor. 
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+//Serial.println("sleep");
+//delay(500);
+//LowPower.idle(SLEEP_8S, ADC_OFF, TIMER2_OFF, TIMER1_OFF, TIMER0_OFF, SPI_OFF, USART0_OFF, TWI_OFF);
+//delay(1000);
+}
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+//end of main loop
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+//Reads DHT11 sensor and writes results of T(C), T(F), and RH(%) to display memory.
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+void DHT_read()  { //Read DHT sensor values
+  //digitalWrite(dhtVcc, HIGH)
+  //delay(warmup);
+  h = dht.readHumidity();
+  t = dht.readTemperature();
+  f = dht.readTemperature(true);
+
+  if (isnan(h) || isnan(t) || isnan(f)) {
+    //display.clearDisplay();
+    display.setCursor(0,0);
+    display.print(F("RD Err!"));
+    display.setCursor(0,10);
+    display.print(F("RD Err!"));
+    //display.display();
+    //delay(1000);
+    return;
+  }
+
+  else  {
+    display.setCursor(0,0);
+    display.print(h);
+    display.print(F(" "));
+    display.setCursor(40,0);
+    display.print(F("% RH"));
+    
+    display.setCursor(0,10);
+    display.print(t);
+    display.print(F(" "));
+    display.setCursor(40,10);
+    display.print(F("Deg. C"));
+    
+    display.setCursor(0,20);
+    display.print(f);
+    display.print(F(" "));
+    display.setCursor(40,20);
+    display.print(F("Deg. F"));
+
+    //display.display();
+  }
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+//DHT sensor response check. Will display either ok or error at boot to confirm working state. 
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+void DHT_read_check()  { //Read DHT sensor values
+  //dht.begin();
+  h = dht.readHumidity();
+  t = dht.readTemperature();
+
+  if (isnan(h) || isnan(t)) {
+    //display.clearDisplay();
+    display.setCursor(0,10);
+    display.print(F("DHT ERR!"));
+    display.display();
+    delay(1000);
+    return;
+  }
+
+  else  {
+    display.setCursor(0,10);
+    display.print(F("DHT OK"));
+    display.display();
+    delay(500);
+  }
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+//Function for reading a given sensor. First attempt 02/27/2022. Pass along calibrated threshold values,
+//analog pin number, (x,y) coords for value display.
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+void read_sensor(byte analog_vcc_pin,byte analog_pin,int lower_bound,int upper_bound,byte x_coord,byte y_coord) {
+  value = 0;
+  sensor_value = 0;
+  digitalWrite(analog_vcc_pin, HIGH); //pull sensor Vdd pin HIGH to power sensor
+  delay(senseWarm); //allow sensor to stabilize
+  for (i=0; i<numReadings; i++) {
+    value = value + analogRead(analog_pin);
+    delay(readDelay);
+  }
+  sensor_value = value/numReadings;
+  digitalWrite(analog_vcc_pin,LOW); //pull sensor Vdd pin LOW to turn off sensor
+  soil_moisture_percent = map(sensor_value, upper_bound, lower_bound, 0, 99); // lower_bound == waterValue, upper_bound == airValue. mapped range is 0-99 since 100 is captured in the below else if statement
+  
+  //create a function for the below instead, passing the 0 and 40 (x,y) positions, air,water values, analog pin (i.e. void reportValue(0, 40))
+  if(sensor_value <= upper_bound and sensor_value >= lower_bound)  {
+    display.setCursor(x_coord,y_coord);
+    display.println(soil_moisture_percent);
+    low_check(soil_moisture_percent);
+  }
+  else if(sensor_value < lower_bound and sensor_value >= 10)  {
+    display.setCursor(x_coord,y_coord);
+    display.println(F("100")); //Fixed this; It makes sense. water Value is lower of the two, duh.--> Not sure why yet, 0 and 100% seem to be reversed in practice. Submerging sensor causes a "<0%" to be printed. Switching from "<0%" to "100%" 
+  }
+  else  {
+    display.setCursor(x_coord,y_coord);
+    display.println(F("Err!"));
+  }
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+//Soil sensor response check function(s). Counts the # of alive sensors and reports value on boot.
+//Needs to also be in a for loop, too long as-is. 
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+void soil_sensor_check() {
+  byte sensor_total;
+  display.setCursor(0,20);
+  display.print(F("SNS OK:"));
+  display.display();
+  sensor_total = sensor_check(4,A0) + sensor_check(5,A1) + sensor_check(6,A2) + sensor_check(7,A3) + sensor_check(8,A6) + sensor_check(9,A7);
+  display.setCursor(45, 20);
+  display.print(sensor_total);
+  display.display();
+
+}
+
+byte sensor_check(byte sensor_Vcc,byte sensor_pin)  {
+  byte sensor_response;
+  byte sensor_value;
+  digitalWrite(sensor_Vcc, HIGH);
+  delay(warmup);
+  sensor_value = analogRead(sensor_pin);
+  if (sensor_value < 10)  {
+    sensor_response = 1;
+  }
+  else  {
+    sensor_response = 0;
+  }
+  return sensor_response;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+//Sensor Calibrations. Should be a for loop that increments which sensor to power and read. This is the
+//initial clunky attempt (02/20/2022). Still not working (03/06/2020).
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+//void sensCalib()  {
+// digitalWrite(sensorVcc0, HIGH); //pull sensor Vdd pin HIGH to power sensor
+// delay(warmup); //allow sensor to stabilize
+// display.clearDisplay();
+// display.setCursor(0,10);
+// display.println(F("Calib"));
+// display.setCursor(50, 10);
+// display.println(F("sns: 0"));
+// display.display();
+//
+// sensorValue0 = analogRead(A0); //read sensor analog signal
+// if (sensorValue0 < 10) {
+//   display.setCursor(30,30); 
+//   display.println(F("Err!"));
+//   delay.microseconds(1000);
+//   return;
+// }
+// else {
+//   display.setCursor(30,30);
+//   display.println(sensorValue0);
+//   display.setCursor(30,40);
+//   display.println(F("saving"));
+//   airValue0 = sensorValue0;
+//   
+// }
+//}
+///////////////////////////////////////////////////////////////////////////////////////
+//  for (i=0, i<6, i++) {
+//    digitalWrite(sensorVcc[i], HIGH); //pull sensor Vdd pin HIGH to power sensor
+//    delay.Microseconds(1000); //allow sensor to stabilize
+//    
+//    for (j=0, j<10, j++)  {
+//      display.clearDisplay();
+//      display.setCursor(0,25);
+//      display.println(F("Calib"));
+//      display.setCursor(50, 25);
+//      display.println(F("sns:"));
+//      display.setCursos(60, 25);
+//      display.println(i);
+//      sensorValue[i] = analogRead(A0); //read sensor analog signal
+//      if (sensorValue0 < 10) {
+//        
+//      }
+//      
+//  }
+//  sensorValue0 = analogRead(A0); //read sensor analog signal
+//
+//  if (sensorValue0 < 10) {
+//    snsOk0 = 0;
+//  }
+//  else {
+//    snsOk0 = 1;
+//  }
+//  digitalWrite(sensorVcc[i], LOW); //pull sensor Vdd pin LOW to sleep  
+//  }
+//
+//}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+//checks if passed soil moisture percent value is below 20%, sets an alarmbit if TRUE.
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+void low_check(byte moisture)  {
+  if (moisture <= 20) {
+    alarm_bit = 1;
+  }
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+//piezo alarm tone to indicate a sensor is reporting low moisture content.
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+void soil_alarm() {
+  if (alarm_bit == 1)  {
+    alarm_buzzer();
+    delay(piezo_delay);
+    alarm_buzzer();
+    delay(piezo_delay);
+    alarm_buzzer();
+  }
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+//Gen-purpose buzzer. Not enough pins to impliment on Atmega328p. Try 4809.
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+void buzzer() { //tone to announce succesful boot and/or warning
+ tone(piezo, piezo_freq, piezo_dur);
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+//Alarm buzzer. Not enough pins to impliment on Atmega328p. Try 4809.
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+void alarm_buzzer() { //tone to announce succesful boot and/or warning
+ tone(piezo, alarm_piezo_freq, alarm_piezo_dur);
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+//boot chime buzzer. Not enough pins to impliment on Atmega328p. Try 4809.
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+void boot_chime()  {
+  const int piezo_pause = 300;
+  tone(piezo,1600,1000);
+  delay(piezo_pause); 
+  tone(piezo,1200,250);
+  delay(piezo_pause);
+  tone(piezo,1200,250);
+  delay(piezo_pause);
+  tone(piezo,1600,250);
+  delay(piezo_pause);
+  tone(piezo,1600,250);
+//  delay(piezo_pause);
+//  tone(piezo,1200,400);
+  digitalWrite(piezo, LOW);
+
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+//Gen-purpose nano built-on LED (D13). Used to debug, show start of main loop, etc. 
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+void LED_blink()  { //blink LED to signal start of loop
+  digitalWrite(ic_LED, HIGH);
+  delay(50);
+  digitalWrite(ic_LED, LOW);
+  delay(50);
+  digitalWrite(ic_LED, HIGH);
+  delay(50);
+  digitalWrite(ic_LED, LOW);
+  delay(50);
+  digitalWrite(ic_LED, HIGH);
+  delay(50);
+  digitalWrite(ic_LED, LOW);
+}
